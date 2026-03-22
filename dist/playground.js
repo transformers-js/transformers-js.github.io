@@ -407,7 +407,7 @@ async function fetchJSON(modelId, filename) {
 
 // src/runtime/session.ts
 var _ort = null;
-var WASM_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+var WASM_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/";
 async function getORT() {
   if (_ort) return _ort;
   const isNode = typeof process !== "undefined" && !!process.versions?.node;
