@@ -377,6 +377,12 @@ async function fetchRaw(modelId, filename) {
   const url = `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Hub fetch failed (${res.status}): ${url}`);
+  const ct = res.headers.get("content-type") ?? "";
+  if (ct.includes("text/html")) {
+    throw new Error(
+      `Expected binary data but got HTML for ${url}. The model may be gated \u2014 accept its license on huggingface.co first.`
+    );
+  }
   return res.arrayBuffer();
 }
 async function fetchJSON(modelId, filename) {
@@ -411,6 +417,12 @@ var ONNXSession = class _ONNXSession {
   }
   static async load(modelBuffer, device, externalData) {
     const ort = await getORT();
+    const firstByte = new Uint8Array(modelBuffer, 0, 1)[0];
+    if (firstByte === 60) {
+      throw new Error(
+        "Model buffer starts with '<' \u2014 received HTML instead of ONNX binary. The model may be gated; accept its license on huggingface.co."
+      );
+    }
     const opts = externalData ? { externalData } : {};
     const candidates = device === "webgpu" ? [["webgpu"], ["wasm"]] : [["wasm"]];
     let lastErr;
