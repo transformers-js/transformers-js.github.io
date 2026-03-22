@@ -386,18 +386,22 @@ async function fetchJSON(modelId, filename) {
 
 // src/runtime/session.ts
 var _ort = null;
-async function getORT(device) {
+var WASM_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+async function getORT() {
   if (_ort) return _ort;
   const isNode = typeof process !== "undefined" && !!process.versions?.node;
   if (isNode) {
     _ort = await import("onnxruntime-node");
   } else {
     _ort = await import("onnxruntime-web");
-    if (device !== "webgpu") {
-      _ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
-    }
   }
   return _ort;
+}
+function ensureWasmPaths(ort) {
+  const o = ort;
+  if (o?.env?.wasm && !o.env.wasm.wasmPaths) {
+    o.env.wasm.wasmPaths = WASM_CDN;
+  }
 }
 var ONNXSession = class _ONNXSession {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,15 +410,34 @@ var ONNXSession = class _ONNXSession {
     this.ort = ort;
   }
   static async load(modelBuffer, device, externalData) {
-    const ort = await getORT(device);
-    const eps = device === "webgpu" ? ["webgpu"] : ["wasm"];
-    const session = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: eps,
-      // ONNX Runtime Web accepts external data as { path, data } objects.
-      // Ignored when undefined — zero cost on models without external data.
-      ...externalData ? { externalData } : {}
-    });
-    return new _ONNXSession(session, ort);
+    const ort = await getORT();
+    const opts = externalData ? { externalData } : {};
+    const candidates = device === "webgpu" ? [["webgpu"], ["wasm"]] : [["wasm"]];
+    let lastErr;
+    for (const eps of candidates) {
+      if (eps[0] === "wasm") ensureWasmPaths(ort);
+      try {
+        const session = await ort.InferenceSession.create(modelBuffer, {
+          executionProviders: eps,
+          ...opts
+        });
+        if (device === "webgpu" && eps[0] === "wasm") {
+          console.warn("[transformers-js] WebGPU EP failed, fell back to WASM EP.");
+        }
+        return new _ONNXSession(session, ort);
+      } catch (err) {
+        lastErr = err;
+        if (eps !== candidates[candidates.length - 1]) {
+          console.warn(`[transformers-js] ${eps[0]} EP failed (${err}), trying wasm\u2026`);
+        }
+      }
+    }
+    if (typeof lastErr === "number") {
+      throw new Error(
+        `ORT session creation failed with native exception (code ${lastErr}). Check the browser console above for ORT error details.`
+      );
+    }
+    throw lastErr;
   }
   async run(inputs) {
     const ort = this.ort;
