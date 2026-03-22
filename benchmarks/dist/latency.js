@@ -374,12 +374,12 @@ async function initRuntime(preferred = "webgpu") {
 // src/runtime/hub.ts
 var HF_ENDPOINT = "https://huggingface.co";
 var _hfToken = null;
-async function fetchRaw(modelId, filename) {
-  const url = `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
-  const headers = _hfToken ? { Authorization: `Bearer ${_hfToken}` } : {};
+async function fetchRaw(modelId, filename, mirrorBaseUrl) {
+  const url = mirrorBaseUrl ? `${mirrorBaseUrl}/${filename.split("/").pop()}` : `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
+  const headers = !mirrorBaseUrl && _hfToken ? { Authorization: `Bearer ${_hfToken}` } : {};
   const res = await fetch(url, { headers });
   if (!res.ok) {
-    const hint = res.status === 401 ? " (gated model \u2014 accept the license on huggingface.co and provide your access token)" : "";
+    const hint = !mirrorBaseUrl && res.status === 401 ? " (gated model \u2014 accept the license on huggingface.co and provide your access token)" : "";
     throw new Error(`Hub fetch failed (${res.status})${hint}: ${url}`);
   }
   const ct = res.headers.get("content-type") ?? "";
@@ -390,8 +390,8 @@ async function fetchRaw(modelId, filename) {
   }
   return res.arrayBuffer();
 }
-async function fetchJSON(modelId, filename) {
-  const buf = await fetchRaw(modelId, filename);
+async function fetchJSON(modelId, filename, mirrorBaseUrl) {
+  const buf = await fetchRaw(modelId, filename, mirrorBaseUrl);
   return JSON.parse(new TextDecoder().decode(buf));
 }
 

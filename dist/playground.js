@@ -392,12 +392,12 @@ var _hfToken = null;
 function setHFToken(token) {
   _hfToken = token.trim() || null;
 }
-async function fetchRaw(modelId, filename) {
-  const url = `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
-  const headers = _hfToken ? { Authorization: `Bearer ${_hfToken}` } : {};
+async function fetchRaw(modelId, filename, mirrorBaseUrl) {
+  const url = mirrorBaseUrl ? `${mirrorBaseUrl}/${filename.split("/").pop()}` : `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
+  const headers = !mirrorBaseUrl && _hfToken ? { Authorization: `Bearer ${_hfToken}` } : {};
   const res = await fetch(url, { headers });
   if (!res.ok) {
-    const hint = res.status === 401 ? " (gated model \u2014 accept the license on huggingface.co and provide your access token)" : "";
+    const hint = !mirrorBaseUrl && res.status === 401 ? " (gated model \u2014 accept the license on huggingface.co and provide your access token)" : "";
     throw new Error(`Hub fetch failed (${res.status})${hint}: ${url}`);
   }
   const ct = res.headers.get("content-type") ?? "";
@@ -408,8 +408,8 @@ async function fetchRaw(modelId, filename) {
   }
   return res.arrayBuffer();
 }
-async function fetchJSON(modelId, filename) {
-  const buf = await fetchRaw(modelId, filename);
+async function fetchJSON(modelId, filename, mirrorBaseUrl) {
+  const buf = await fetchRaw(modelId, filename, mirrorBaseUrl);
   return JSON.parse(new TextDecoder().decode(buf));
 }
 
@@ -3396,10 +3396,10 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
   constructor(tokenizer) {
     this.tokenizer = tokenizer;
   }
-  static async fromHub(modelId) {
+  static async fromHub(modelId, mirrorBaseUrl) {
     const [tokenizerJson, tokenizerConfig] = await Promise.all([
-      fetchJSON(modelId, "tokenizer.json"),
-      fetchJSON(modelId, "tokenizer_config.json")
+      fetchJSON(modelId, "tokenizer.json", mirrorBaseUrl),
+      fetchJSON(modelId, "tokenizer_config.json", mirrorBaseUrl)
     ]);
     return new _LFM2Tokenizer(new Tokenizer_default(tokenizerJson, tokenizerConfig));
   }
@@ -3587,14 +3587,14 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
     this.inputNames = inputNames;
   }
   static async fromHub(modelId, options = {}) {
-    const { device = "webgpu", precision = "q8" } = options;
+    const { device = "webgpu", precision = "q8", mirrorBaseUrl } = options;
     const onnxFile = ONNX_FILE[precision];
     const dataFile = DATA_FILE[precision];
     const [modelBuffer, dataBuffer, config, tokenizer] = await Promise.all([
-      fetchRaw(modelId, onnxFile),
-      fetchRaw(modelId, dataFile),
-      fetchJSON(modelId, "config.json"),
-      LFM2Tokenizer.fromHub(modelId)
+      fetchRaw(modelId, onnxFile, mirrorBaseUrl),
+      fetchRaw(modelId, dataFile, mirrorBaseUrl),
+      fetchJSON(modelId, "config.json", mirrorBaseUrl),
+      LFM2Tokenizer.fromHub(modelId, mirrorBaseUrl)
     ]);
     const externalData = [{ path: dataFile.split("/").pop(), data: dataBuffer }];
     const session = await ONNXSession.load(modelBuffer, device, externalData);
@@ -3723,7 +3723,7 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
     this.decoderInputNames = decoderInputNames;
   }
   static async fromHub(modelId, options = {}) {
-    const { device = "webgpu", precision = "q4" } = options;
+    const { device = "webgpu", precision = "q4", mirrorBaseUrl } = options;
     const [decoderFile, decoderData] = DECODER_FILE[precision];
     const [
       embedImagesBuffer,
@@ -3735,14 +3735,14 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
       config,
       tokenizer
     ] = await Promise.all([
-      fetchRaw(modelId, "onnx/embed_images_fp16.onnx"),
-      fetchRaw(modelId, "onnx/embed_images_fp16.onnx_data"),
-      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx"),
-      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx_data"),
-      fetchRaw(modelId, decoderFile),
-      fetchRaw(modelId, decoderData),
-      fetchJSON(modelId, "config.json"),
-      LFM2Tokenizer.fromHub(modelId)
+      fetchRaw(modelId, "onnx/embed_images_fp16.onnx", mirrorBaseUrl),
+      fetchRaw(modelId, "onnx/embed_images_fp16.onnx_data", mirrorBaseUrl),
+      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx", mirrorBaseUrl),
+      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx_data", mirrorBaseUrl),
+      fetchRaw(modelId, decoderFile, mirrorBaseUrl),
+      fetchRaw(modelId, decoderData, mirrorBaseUrl),
+      fetchJSON(modelId, "config.json", mirrorBaseUrl),
+      LFM2Tokenizer.fromHub(modelId, mirrorBaseUrl)
     ]);
     const [embedImagesSession, embedTokensSession, decoderSession] = await Promise.all([
       ONNXSession.load(embedImagesBuffer, device, [
