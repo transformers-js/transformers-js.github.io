@@ -373,10 +373,15 @@ async function initRuntime(preferred = "webgpu") {
 
 // src/runtime/hub.ts
 var HF_ENDPOINT = "https://huggingface.co";
+var _hfToken = null;
 async function fetchRaw(modelId, filename) {
   const url = `${HF_ENDPOINT}/${modelId}/resolve/main/${filename}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Hub fetch failed (${res.status}): ${url}`);
+  const headers = _hfToken ? { Authorization: `Bearer ${_hfToken}` } : {};
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const hint = res.status === 401 ? " (gated model \u2014 accept the license on huggingface.co and provide your access token)" : "";
+    throw new Error(`Hub fetch failed (${res.status})${hint}: ${url}`);
+  }
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("text/html")) {
     throw new Error(
