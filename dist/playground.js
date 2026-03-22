@@ -3586,6 +3586,273 @@ var TextGenerationPipeline = class _TextGenerationPipeline {
   }
 };
 
+// src/preprocessing/lfm2-vl.ts
+var TILE_SIZE = 512;
+var PATCH_SIZE = 16;
+var DOWNSAMPLE = 2;
+var PATCHES_PER_SIDE = TILE_SIZE / PATCH_SIZE / DOWNSAMPLE;
+var TOKENS_PER_TILE = PATCHES_PER_SIDE * PATCHES_PER_SIDE;
+var IMAGE_MEAN = [0.5, 0.5, 0.5];
+var IMAGE_STD = [0.5, 0.5, 0.5];
+function bestTiling(w, h, maxContent) {
+  let bestRows = 1, bestCols = 1, bestScale = 0;
+  for (let rows = 1; rows <= maxContent; rows++) {
+    for (let cols = 1; cols <= maxContent; cols++) {
+      if (rows * cols > maxContent) continue;
+      const scale = Math.min(
+        rows * TILE_SIZE / h,
+        cols * TILE_SIZE / w
+      );
+      if (scale > bestScale) {
+        bestScale = scale;
+        [bestRows, bestCols] = [rows, cols];
+      }
+    }
+  }
+  return [bestRows, bestCols];
+}
+async function normalizeTile(image) {
+  const resized = await resize(image, { width: TILE_SIZE, height: TILE_SIZE }, "bilinear");
+  const rescaled = rescale(resized, 1 / 255);
+  const normalized = normalize(rescaled, IMAGE_MEAN, IMAGE_STD);
+  return hwcToChw(normalized);
+}
+async function preprocessVLImage(image, maxTiles = 10) {
+  const maxContent = maxTiles - 1;
+  const [rows, cols] = bestTiling(image.width, image.height, maxContent);
+  const tilePxls = [];
+  const cropW = Math.floor(image.width / cols);
+  const cropH = Math.floor(image.height / rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const left = c * cropW;
+      const top = r * cropH;
+      const right = c < cols - 1 ? left + cropW : image.width;
+      const bottom = r < rows - 1 ? top + cropH : image.height;
+      tilePxls.push(await normalizeTile(crop(image, { left, top, right, bottom })));
+    }
+  }
+  tilePxls.push(await normalizeTile(image));
+  const numTiles = tilePxls.length;
+  const pixPerTile = 3 * TILE_SIZE * TILE_SIZE;
+  const pixelValues = new Float32Array(numTiles * pixPerTile);
+  for (let i = 0; i < numTiles; i++) pixelValues.set(tilePxls[i], i * pixPerTile);
+  const pixelAttentionMask = new BigInt64Array(numTiles * TILE_SIZE * TILE_SIZE).fill(1n);
+  const spatialShapes = new BigInt64Array(numTiles * 2);
+  for (let i = 0; i < numTiles; i++) {
+    spatialShapes[i * 2] = BigInt(PATCHES_PER_SIDE);
+    spatialShapes[i * 2 + 1] = BigInt(PATCHES_PER_SIDE);
+  }
+  return { pixelValues, pixelAttentionMask, spatialShapes, numTiles };
+}
+
+// src/models/lfm2-vl.ts
+var DECODER_FILE = {
+  q4: ["onnx/decoder_q4.onnx", "onnx/decoder_q4.onnx_data"],
+  q8: ["onnx/decoder_q8.onnx", "onnx/decoder_q8.onnx_data"],
+  fp16: ["onnx/decoder_fp16.onnx", "onnx/decoder_fp16.onnx_data"]
+};
+var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
+  constructor(embedImages, embedTokens, decoder, tokenizer, modelCfg, eosTokenId, imageTokenId, maxTiles, hasPositionIds, hiddenSize) {
+    this.embedImages = embedImages;
+    this.embedTokens = embedTokens;
+    this.decoder = decoder;
+    this.tokenizer = tokenizer;
+    this.modelCfg = modelCfg;
+    this.eosTokenId = eosTokenId;
+    this.imageTokenId = imageTokenId;
+    this.maxTiles = maxTiles;
+    this.hasPositionIds = hasPositionIds;
+    this.hiddenSize = hiddenSize;
+  }
+  static async fromHub(modelId, options = {}) {
+    const { device = "webgpu", precision = "q4" } = options;
+    const [decoderFile, decoderData] = DECODER_FILE[precision];
+    const [
+      embedImagesBuffer,
+      embedImagesData,
+      embedTokensBuffer,
+      embedTokensData,
+      decoderBuffer,
+      decoderDataBuffer,
+      config,
+      tokenizer
+    ] = await Promise.all([
+      fetchRaw(modelId, "onnx/embed_images_fp16.onnx"),
+      fetchRaw(modelId, "onnx/embed_images_fp16.onnx_data"),
+      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx"),
+      fetchRaw(modelId, "onnx/embed_tokens_fp16.onnx_data"),
+      fetchRaw(modelId, decoderFile),
+      fetchRaw(modelId, decoderData),
+      fetchJSON(modelId, "config.json"),
+      LFM2Tokenizer.fromHub(modelId)
+    ]);
+    const [embedImagesSession, embedTokensSession, decoderSession] = await Promise.all([
+      ONNXSession.load(embedImagesBuffer, device, [
+        { path: "embed_images_fp16.onnx_data", data: embedImagesData }
+      ]),
+      ONNXSession.load(embedTokensBuffer, device, [
+        { path: "embed_tokens_fp16.onnx_data", data: embedTokensData }
+      ]),
+      ONNXSession.load(decoderBuffer, device, [
+        { path: decoderData.split("/").pop(), data: decoderDataBuffer }
+      ])
+    ]);
+    const decInputNames = decoderSession.session.inputNames ?? [];
+    const hasPositionIds = decInputNames.includes("position_ids");
+    const textCfg = config.text_config;
+    return new _LFM2VLForConditionalGeneration(
+      embedImagesSession,
+      embedTokensSession,
+      decoderSession,
+      tokenizer,
+      textCfg,
+      textCfg.eos_token_id,
+      config.image_token_id,
+      config.max_tiles,
+      hasPositionIds,
+      textCfg.hidden_size
+    );
+  }
+  async chat(messages, image, options = {}) {
+    const { maxNewTokens = 512, sampling } = options;
+    const { pixelValues, pixelAttentionMask, spatialShapes, numTiles } = await preprocessVLImage(image, this.maxTiles);
+    const imgOut = await this.embedImages.run({
+      pixel_values: { data: pixelValues, dims: [numTiles, 3, 512, 512] },
+      pixel_attention_mask: { data: pixelAttentionMask, dims: [numTiles, 512, 512] },
+      spatial_shapes: { data: spatialShapes, dims: [numTiles, 2] }
+    });
+    const imageFeatures = imgOut["image_features"].data;
+    const imgEmbedTokens = numTiles * TOKENS_PER_TILE;
+    const vlMessages = injectImageToken(messages);
+    const promptIds = this.tokenizer.encodeChat(vlMessages);
+    const inputIds = new BigInt64Array(promptIds.map(BigInt));
+    const tokOut = await this.embedTokens.run({
+      input_ids: { data: inputIds, dims: [1, promptIds.length] }
+    });
+    const tokenEmbeds = tokOut["inputs_embeds"].data;
+    const prefillEmbeds = spliceImageEmbeds(
+      tokenEmbeds,
+      promptIds,
+      this.imageTokenId,
+      imageFeatures,
+      imgEmbedTokens,
+      this.hiddenSize
+    );
+    const prefillSeqLen = prefillEmbeds.length / this.hiddenSize;
+    const cache = initCache(this.modelCfg);
+    const attnMask = new BigInt64Array(prefillSeqLen).fill(1n);
+    const prefillInputs = {
+      inputs_embeds: { data: prefillEmbeds, dims: [1, prefillSeqLen, this.hiddenSize] },
+      attention_mask: { data: attnMask, dims: [1, prefillSeqLen] },
+      ...cache
+    };
+    if (this.hasPositionIds) {
+      prefillInputs["position_ids"] = {
+        data: new BigInt64Array(prefillSeqLen).map((_, i) => BigInt(i)),
+        dims: [1, prefillSeqLen]
+      };
+    }
+    const prefillOut = await this.decoder.run(prefillInputs);
+    updateCache(cache, prefillOut);
+    const vocabSize = prefillOut["logits"].dims[2];
+    const lastLogits = new Float32Array(
+      prefillOut["logits"].data.buffer,
+      (prefillSeqLen - 1) * vocabSize * 4,
+      vocabSize
+    );
+    let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
+    const generated = [nextToken];
+    let pastLen = prefillSeqLen;
+    while (nextToken !== this.eosTokenId && generated.length < maxNewTokens) {
+      const singleId = new BigInt64Array([BigInt(nextToken)]);
+      const embedOut = await this.embedTokens.run({
+        input_ids: { data: singleId, dims: [1, 1] }
+      });
+      const singleEmbed = embedOut["inputs_embeds"].data;
+      const decInputs = {
+        inputs_embeds: { data: singleEmbed, dims: [1, 1, this.hiddenSize] },
+        attention_mask: { data: new BigInt64Array(pastLen + 1).fill(1n), dims: [1, pastLen + 1] },
+        ...cache
+      };
+      if (this.hasPositionIds) {
+        decInputs["position_ids"] = {
+          data: new BigInt64Array([BigInt(pastLen)]),
+          dims: [1, 1]
+        };
+      }
+      const out = await this.decoder.run(decInputs);
+      updateCache(cache, out);
+      pastLen++;
+      nextToken = sampling ? sampleTopP(out["logits"].data, sampling) : argmax(out["logits"].data);
+      generated.push(nextToken);
+    }
+    if (generated[generated.length - 1] === this.eosTokenId) generated.pop();
+    return this.tokenizer.decode(generated);
+  }
+  dispose() {
+    this.embedImages.dispose();
+    this.embedTokens.dispose();
+    this.decoder.dispose();
+  }
+};
+function injectImageToken(messages) {
+  const out = [];
+  let injected = false;
+  for (const msg of messages) {
+    if (!injected && msg.role === "user") {
+      out.push({ ...msg, content: `<image>
+${msg.content}` });
+      injected = true;
+    } else {
+      out.push(msg);
+    }
+  }
+  return out;
+}
+function spliceImageEmbeds(tokenEmbeds, promptIds, imageTokenId, imageFeatures, imgEmbedTokens, hiddenSize) {
+  const outSeqLen = promptIds.reduce(
+    (acc, id) => acc + (id === imageTokenId ? imgEmbedTokens : 1),
+    0
+  );
+  const out = new Float32Array(outSeqLen * hiddenSize);
+  let outPos = 0;
+  let imgFeaturePos = 0;
+  for (let i = 0; i < promptIds.length; i++) {
+    if (promptIds[i] === imageTokenId) {
+      const src = imageFeatures.subarray(
+        imgFeaturePos * hiddenSize,
+        (imgFeaturePos + imgEmbedTokens) * hiddenSize
+      );
+      out.set(src, outPos * hiddenSize);
+      outPos += imgEmbedTokens;
+      imgFeaturePos += imgEmbedTokens;
+    } else {
+      out.set(tokenEmbeds.subarray(i * hiddenSize, (i + 1) * hiddenSize), outPos * hiddenSize);
+      outPos++;
+    }
+  }
+  return out;
+}
+
+// src/pipeline/image-text-to-text.ts
+var ImageTextToTextPipeline = class _ImageTextToTextPipeline {
+  constructor(model) {
+    this.model = model;
+  }
+  static async create(modelId, options = {}) {
+    const model = await LFM2VLForConditionalGeneration.fromHub(modelId, options);
+    return new _ImageTextToTextPipeline(model);
+  }
+  /** Send an image + conversation and get the assistant reply. */
+  run(messages, image, options = {}) {
+    return this.model.chat(messages, image, options);
+  }
+  dispose() {
+    this.model.dispose();
+  }
+};
+
 // src/pipeline/index.ts
 async function pipeline(task, options) {
   const { model, ...rest } = options;
@@ -3598,6 +3865,8 @@ async function pipeline(task, options) {
       return ImageSegmentationPipeline.create(model, rest);
     case "text-generation":
       return TextGenerationPipeline.create(model, rest);
+    case "image-text-to-text":
+      return ImageTextToTextPipeline.create(model, rest);
   }
 }
 export {
