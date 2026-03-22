@@ -3480,7 +3480,7 @@ function initCache(cfg) {
       cache[val] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
       attnIdx++;
     } else {
-      const key = `past_conv_${convIdx}`;
+      const key = `past_conv.${convIdx}`;
       cache[key] = {
         data: new Float32Array(cfg.hidden_size * cfg.conv_L_cache),
         dims: [1, cfg.hidden_size, cfg.conv_L_cache]
@@ -3493,7 +3493,7 @@ function initCache(cfg) {
 function updateCache(cache, outputs) {
   for (const [name, tensor] of Object.entries(outputs)) {
     if (name === "logits") continue;
-    const cacheKey = name.replace("present_conv_", "past_conv_").replace(/^present\./, "past_key_values.");
+    const cacheKey = name.replace("present_conv.", "past_conv.").replace(/^present\./, "past_key_values.");
     cache[cacheKey] = { data: tensor.data, dims: tensor.dims };
   }
 }
