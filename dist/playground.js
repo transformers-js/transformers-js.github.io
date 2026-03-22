@@ -3467,23 +3467,17 @@ function sampleFromProbs(probs) {
 }
 
 // src/generation/loop.ts
-function initCache(cfg) {
+function initCache(inputNames, cfg) {
   const cache = {};
   const headDim = cfg.hidden_size / cfg.num_attention_heads;
-  let attnIdx = 0;
-  let convIdx = 0;
-  for (let i = 0; i < cfg.layer_types.length; i++) {
-    const layerType = cfg.layer_types[i];
-    if (layerType === "full_attention") {
-      cache[`past_key_values.${i}.key`] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
-      cache[`past_key_values.${i}.value`] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
-      attnIdx++;
-    } else {
-      cache[`past_conv.${convIdx}`] = {
+  for (const name of inputNames) {
+    if (name.endsWith(".key") || name.endsWith(".value")) {
+      cache[name] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
+    } else if (name.startsWith("past_conv.")) {
+      cache[name] = {
         data: new Float32Array(cfg.hidden_size * cfg.conv_L_cache),
         dims: [1, cfg.hidden_size, cfg.conv_L_cache]
       };
-      convIdx++;
     }
   }
   return cache;
@@ -3495,10 +3489,10 @@ function updateCache(cache, outputs) {
     cache[cacheKey] = { data: tensor.data, dims: tensor.dims };
   }
 }
-async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds) {
+async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, inputNames) {
   const { eosTokenId, maxNewTokens = 512, sampling } = genCfg;
   const generated = [];
-  const cache = initCache(modelCfg);
+  const cache = initCache(inputNames, modelCfg);
   const seqLen = promptIds.length;
   const inputIds = new BigInt64Array(promptIds.map(BigInt));
   const attentionMask = new BigInt64Array(seqLen).fill(1n);
@@ -3557,12 +3551,13 @@ var DATA_FILE = {
   fp16: "onnx/model_fp16.onnx_data"
 };
 var LFM2ForCausalLM = class _LFM2ForCausalLM {
-  constructor(session, tokenizer, modelCfg, eosTokenId, hasPositionIds) {
+  constructor(session, tokenizer, modelCfg, eosTokenId, hasPositionIds, inputNames) {
     this.session = session;
     this.tokenizer = tokenizer;
     this.modelCfg = modelCfg;
     this.eosTokenId = eosTokenId;
     this.hasPositionIds = hasPositionIds;
+    this.inputNames = inputNames;
   }
   static async fromHub(modelId, options = {}) {
     const { device = "webgpu", precision = "q8" } = options;
@@ -3578,7 +3573,7 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
     const session = await ONNXSession.load(modelBuffer, device, externalData);
     const inputNames = session.session.inputNames ?? [];
     const hasPositionIds = inputNames.includes("position_ids");
-    return new _LFM2ForCausalLM(session, tokenizer, config, config.eos_token_id, hasPositionIds);
+    return new _LFM2ForCausalLM(session, tokenizer, config, config.eos_token_id, hasPositionIds, inputNames);
   }
   async chat(messages, options = {}) {
     const promptIds = this.tokenizer.encodeChat(messages);
@@ -3592,7 +3587,8 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
       promptIds,
       this.modelCfg,
       genCfg,
-      this.hasPositionIds
+      this.hasPositionIds,
+      this.inputNames
     );
     return this.tokenizer.decode(generatedIds);
   }
@@ -3686,7 +3682,7 @@ var DECODER_FILE = {
   fp16: ["onnx/decoder_fp16.onnx", "onnx/decoder_fp16.onnx_data"]
 };
 var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
-  constructor(embedImages, embedTokens, decoder, tokenizer, modelCfg, eosTokenId, imageTokenId, maxTiles, hasPositionIds, hiddenSize) {
+  constructor(embedImages, embedTokens, decoder, tokenizer, modelCfg, eosTokenId, imageTokenId, maxTiles, hasPositionIds, hiddenSize, decoderInputNames) {
     this.embedImages = embedImages;
     this.embedTokens = embedTokens;
     this.decoder = decoder;
@@ -3697,6 +3693,7 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
     this.maxTiles = maxTiles;
     this.hasPositionIds = hasPositionIds;
     this.hiddenSize = hiddenSize;
+    this.decoderInputNames = decoderInputNames;
   }
   static async fromHub(modelId, options = {}) {
     const { device = "webgpu", precision = "q4" } = options;
@@ -3744,7 +3741,8 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
       config.image_token_id,
       config.max_tiles,
       hasPositionIds,
-      textCfg.hidden_size
+      textCfg.hidden_size,
+      decInputNames
     );
   }
   async chat(messages, image, options = {}) {
@@ -3773,7 +3771,7 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
       this.hiddenSize
     );
     const prefillSeqLen = prefillEmbeds.length / this.hiddenSize;
-    const cache = initCache(this.modelCfg);
+    const cache = initCache(this.decoderInputNames, this.modelCfg);
     const attnMask = new BigInt64Array(prefillSeqLen).fill(1n);
     const prefillInputs = {
       inputs_embeds: { data: prefillEmbeds, dims: [1, prefillSeqLen, this.hiddenSize] },
