@@ -67,17 +67,32 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.meta.outputs.tag }}"
+          MODEL="${{ inputs.model }}"
+          REPO="${{ github.repository }}"
+
+          python3 - <<EOF
+          import os, textwrap
+          tag   = os.environ["TAG"]
+          model = os.environ["MODEL"]
+          repo  = os.environ["REPO"]
+          notes = textwrap.dedent(f"""
+            Mirror of [{model}](https://huggingface.co/{model}) — q4 quantization.
+
+            Files are served flat (no \`onnx/\` subdirectory). Use \`mirrorBaseUrl\` in model options:
+
+            \`\`\`ts
+            LFM2ForCausalLM.fromHub('{model}', {{
+              mirrorBaseUrl: 'https://github.com/{repo}/releases/download/{tag}',
+            }})
+            \`\`\`
+
+            > Verify the [LFM1.0 license](https://huggingface.co/{model}/blob/main/LICENSE) permits redistribution before using this mirror.
+          """).strip()
+          with open("notes.md", "w") as f:
+              f.write(notes)
+          EOF
+
           gh release create "$TAG" dl/* \
-            --repo "${{ github.repository }}" \
-            --title "${{ inputs.model }} (q4)" \
-            --notes "Mirror of [\`${{ inputs.model }}\`](https://huggingface.co/${{ inputs.model }}) — q4 quantization.
-
-Files are served flat (no \`onnx/\` subdirectory). Set \`mirrorBaseUrl\` in model options:
-
-\`\`\`ts
-LFM2ForCausalLM.fromHub('${{ inputs.model }}', {
-  mirrorBaseUrl: 'https://github.com/${{ github.repository }}/releases/download/$TAG',
-})
-\`\`\`
-
-> Verify that the [LFM1.0 license](https://huggingface.co/${{ inputs.model }}/blob/main/LICENSE) permits redistribution before using this mirror."
+            --repo "$REPO" \
+            --title "$MODEL (q4)" \
+            --notes-file notes.md
