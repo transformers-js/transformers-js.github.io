@@ -405,11 +405,14 @@ var ONNXSession = class _ONNXSession {
     this.session = session;
     this.ort = ort;
   }
-  static async load(modelBuffer, device) {
+  static async load(modelBuffer, device, externalData) {
     const ort = await getORT(device);
     const eps = device === "webgpu" ? ["webgpu"] : ["wasm"];
     const session = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: eps
+      executionProviders: eps,
+      // ONNX Runtime Web accepts external data as { path, data } objects.
+      // Ignored when undefined — zero cost on models without external data.
+      ...externalData ? { externalData } : {}
     });
     return new _ONNXSession(session, ort);
   }
