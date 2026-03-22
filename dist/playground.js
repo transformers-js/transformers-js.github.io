@@ -3472,16 +3472,14 @@ function initCache(cfg) {
   const headDim = cfg.hidden_size / cfg.num_attention_heads;
   let attnIdx = 0;
   let convIdx = 0;
-  for (const layerType of cfg.layer_types) {
+  for (let i = 0; i < cfg.layer_types.length; i++) {
+    const layerType = cfg.layer_types[i];
     if (layerType === "full_attention") {
-      const key = `past_key_values.${attnIdx}.key`;
-      const val = `past_key_values.${attnIdx}.value`;
-      cache[key] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
-      cache[val] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
+      cache[`past_key_values.${i}.key`] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
+      cache[`past_key_values.${i}.value`] = { data: new Float32Array(0), dims: [1, cfg.num_key_value_heads, 0, headDim] };
       attnIdx++;
     } else {
-      const key = `past_conv.${convIdx}`;
-      cache[key] = {
+      cache[`past_conv.${convIdx}`] = {
         data: new Float32Array(cfg.hidden_size * cfg.conv_L_cache),
         dims: [1, cfg.hidden_size, cfg.conv_L_cache]
       };
