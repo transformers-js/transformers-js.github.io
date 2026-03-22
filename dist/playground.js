@@ -3404,8 +3404,8 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
     return new _LFM2Tokenizer(new Tokenizer_default(tokenizerJson, tokenizerConfig));
   }
   /** Apply chat template and encode to token ids. */
-  encodeChat(messages) {
-    const text = this.applyChatTemplate(messages);
+  encodeChat(messages, tools) {
+    const text = this.applyChatTemplate(messages, tools);
     const enc = this.tokenizer.encode(text, { add_special_tokens: false });
     return enc.ids;
   }
@@ -3414,12 +3414,31 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
     return this.tokenizer.decode(ids, { skip_special_tokens: true });
   }
   /**
-   * Static chat template matching the model's Jinja2 template.
-   * <|im_start|>role\ncontent<|im_end|>\n…<|im_start|>assistant\n
+   * Mirrors the model's Jinja2 chat template:
+   * - Extracts system message if first
+   * - Injects tools as "List of tools: [...]" appended to system prompt
+   * - Formats: <|im_start|>role\ncontent<|im_end|>\n…<|im_start|>assistant\n
    */
-  applyChatTemplate(messages) {
+  applyChatTemplate(messages, tools) {
+    const msgs = [...messages];
+    let systemPrompt = "";
+    const first = msgs[0];
+    if (first?.role === "system") {
+      systemPrompt = first.content;
+      msgs.shift();
+    }
+    if (tools && tools.length > 0) {
+      const toolsStr = `List of tools: [${tools.map((t) => JSON.stringify(t)).join(", ")}]`;
+      systemPrompt = systemPrompt ? `${systemPrompt}
+${toolsStr}` : toolsStr;
+    }
     let out = "";
-    for (const { role, content } of messages) {
+    if (systemPrompt) {
+      out += `<|im_start|>system
+${systemPrompt}<|im_end|>
+`;
+    }
+    for (const { role, content } of msgs) {
       out += `<|im_start|>${role}
 ${content}<|im_end|>
 `;
@@ -3584,7 +3603,7 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
     return new _LFM2ForCausalLM(session, tokenizer, config, config.eos_token_id, hasPositionIds, inputNames);
   }
   async chat(messages, options = {}) {
-    const promptIds = this.tokenizer.encodeChat(messages);
+    const promptIds = this.tokenizer.encodeChat(messages, options.tools);
     const genCfg = {
       eosTokenId: this.eosTokenId,
       ...options.maxNewTokens !== void 0 ? { maxNewTokens: options.maxNewTokens } : {},
