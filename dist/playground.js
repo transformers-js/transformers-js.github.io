@@ -477,7 +477,9 @@ var ONNXSession = class _ONNXSession {
   async run(inputs) {
     const ort = this.ort;
     const feeds = {};
+    const validNames = new Set(this.session.inputNames ?? []);
     for (const [name, { data, dims }] of Object.entries(inputs)) {
+      if (validNames.size > 0 && !validNames.has(name)) continue;
       const dtype = data instanceof BigInt64Array ? "int64" : "float32";
       feeds[name] = new ort.Tensor(dtype, data, dims);
     }
