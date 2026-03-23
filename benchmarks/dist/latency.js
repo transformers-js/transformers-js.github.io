@@ -414,6 +414,7 @@ function ensureWasmPaths(ort) {
     o.env.wasm.wasmPaths = WASM_CDN;
   }
 }
+var _webgpuQueue = Promise.resolve();
 var ONNXSession = class _ONNXSession {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(session, ort) {
@@ -429,32 +430,41 @@ var ONNXSession = class _ONNXSession {
       );
     }
     const opts = externalData ? { externalData } : {};
-    const candidates = device === "webgpu" ? [["webgpu"], ["wasm"]] : [["wasm"]];
-    let lastErr;
-    for (const eps of candidates) {
-      if (eps[0] === "wasm") ensureWasmPaths(ort);
+    if (device === "webgpu") {
+      let release;
+      const ticket = new Promise((r) => {
+        release = r;
+      });
+      const prev = _webgpuQueue;
+      _webgpuQueue = ticket;
       try {
+        await prev;
         const session = await ort.InferenceSession.create(modelBuffer, {
-          executionProviders: eps,
+          executionProviders: ["webgpu"],
           ...opts
         });
-        if (device === "webgpu" && eps[0] === "wasm") {
-          console.warn("[transformers-js] WebGPU EP failed, fell back to WASM EP.");
-        }
         return new _ONNXSession(session, ort);
       } catch (err) {
-        lastErr = err;
-        if (eps !== candidates[candidates.length - 1]) {
-          console.warn(`[transformers-js] ${eps[0]} EP failed (${err}), trying wasm\u2026`);
-        }
+        console.warn(`[transformers-js] WebGPU EP failed (${err}), falling back to WASM.`);
+      } finally {
+        release();
       }
     }
-    if (typeof lastErr === "number") {
-      throw new Error(
-        `ORT session creation failed with native exception (code ${lastErr}). Check the browser console above for ORT error details.`
-      );
+    ensureWasmPaths(ort);
+    try {
+      const session = await ort.InferenceSession.create(modelBuffer, {
+        executionProviders: ["wasm"],
+        ...opts
+      });
+      return new _ONNXSession(session, ort);
+    } catch (err) {
+      if (typeof err === "number") {
+        throw new Error(
+          `ORT session creation failed with native exception (code ${err}). Check the browser console for ORT error details.`
+        );
+      }
+      throw err;
     }
-    throw lastErr;
   }
   async run(inputs) {
     const ort = this.ort;
