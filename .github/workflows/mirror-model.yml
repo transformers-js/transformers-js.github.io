@@ -39,6 +39,19 @@ jobs:
             exit 1
           fi
 
+          # Verify token has access before spending time on large downloads.
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            "https://huggingface.co/api/models/${{ inputs.model }}")
+          if [ "$STATUS" = "401" ]; then
+            echo "::error::Token rejected (401). Check that HF_TOKEN is valid."
+            exit 1
+          elif [ "$STATUS" = "403" ] || [ "$STATUS" = "404" ]; then
+            echo "::error::Access denied ($STATUS). Accept the model license at https://huggingface.co/${{ inputs.model }} while logged in as the token owner."
+            exit 1
+          fi
+          echo "Access check passed (HTTP $STATUS)."
+
           BASE="https://huggingface.co/${{ inputs.model }}/resolve/main"
           mkdir dl
 
