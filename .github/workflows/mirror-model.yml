@@ -34,6 +34,11 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set. Add it under Settings → Secrets → Actions."
+            exit 1
+          fi
+
           BASE="https://huggingface.co/${{ inputs.model }}/resolve/main"
           mkdir dl
 
