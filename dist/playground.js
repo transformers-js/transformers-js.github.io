@@ -3440,7 +3440,12 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
       msgs.shift();
     }
     if (tools && tools.length > 0) {
-      const toolsStr = `List of tools: [${tools.map((t) => JSON.stringify(t)).join(", ")}]`;
+      const toolList = tools.map((t) => JSON.stringify(t)).join("\n");
+      const toolsStr = `You have access to the following tools:
+${toolList}
+
+To call a tool, output exactly:
+<|tool_call_start|>[{"name": "tool_name", "arguments": {"key": "value"}}]<|tool_call_end|>`;
       systemPrompt = systemPrompt ? `${systemPrompt}
 ${toolsStr}` : toolsStr;
     }
