@@ -3560,6 +3560,7 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
   const logitsData = prefillOut["logits"].data;
   const lastLogits = logitsData.subarray(logitsData.length - vocabSize);
   let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
+  console.debug("[tfjs] prefill logits dims:", logitsDims, "vocabSize:", vocabSize, "firstToken:", nextToken, "eosTokenId:", eosTokenId);
   generated.push(nextToken);
   let pastLen = seqLen;
   while (nextToken !== eosTokenId && generated.length < maxNewTokens) {
@@ -3639,6 +3640,7 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
       this.hasPositionIds,
       this.inputNames
     );
+    console.debug("[tfjs] generatedIds:", generatedIds, "eosTokenId:", this.eosTokenId);
     return this.tokenizer.decode(generatedIds);
   }
   dispose() {
