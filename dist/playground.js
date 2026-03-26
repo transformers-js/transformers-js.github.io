@@ -3540,6 +3540,7 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
   const seqLen = promptIds.length;
   const inputIds = new BigInt64Array(promptIds.map(BigInt));
   const attentionMask = new BigInt64Array(seqLen).fill(1n);
+  const hasNumLogitsToKeep = inputNames.includes("num_logits_to_keep");
   const prefillInputs = {
     input_ids: { data: inputIds, dims: [1, seqLen] },
     attention_mask: { data: attentionMask, dims: [1, seqLen] },
@@ -3549,12 +3550,16 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
     const posIds = new BigInt64Array(seqLen).map((_, i) => BigInt(i));
     prefillInputs["position_ids"] = { data: posIds, dims: [1, seqLen] };
   }
+  if (hasNumLogitsToKeep) {
+    prefillInputs["num_logits_to_keep"] = { data: new BigInt64Array([1n]), dims: [1] };
+  }
   const prefillOut = await session.run(prefillInputs);
   updateCache(cache, prefillOut);
   const vocabSize = prefillOut["logits"].dims[2];
+  const prefillLogitOffset = hasNumLogitsToKeep ? 0 : (seqLen - 1) * vocabSize * 4;
   const lastLogits = new Float32Array(
     prefillOut["logits"].data.buffer,
-    (seqLen - 1) * vocabSize * 4,
+    prefillLogitOffset,
     vocabSize
   );
   let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
@@ -3571,6 +3576,9 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
         data: new BigInt64Array([BigInt(pastLen)]),
         dims: [1, 1]
       };
+    }
+    if (hasNumLogitsToKeep) {
+      decodeInputs["num_logits_to_keep"] = { data: new BigInt64Array([1n]), dims: [1] };
     }
     const out = await session.run(decodeInputs);
     updateCache(cache, out);
