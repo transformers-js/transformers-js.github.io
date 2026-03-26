@@ -3426,10 +3426,9 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
     return this.tokenizer.decode(ids, { skip_special_tokens: true });
   }
   /**
-   * Mirrors the model's Jinja2 chat template:
-   * - Extracts system message if first
-   * - Injects tools as "List of tools: [...]" appended to system prompt
-   * - Formats: <|im_start|>role\ncontent<|im_end|>\n…<|im_start|>assistant\n
+   * Mirrors the model's Jinja2 chat template.
+   * Starts with BOS (<|startoftext|>) as the template does: {{- bos_token -}}
+   * Tools are injected via <|tool_list_start|>...<|tool_list_end|> per the template.
    */
   applyChatTemplate(messages, tools) {
     const msgs = [...messages];
@@ -3440,16 +3439,12 @@ var LFM2Tokenizer = class _LFM2Tokenizer {
       msgs.shift();
     }
     if (tools && tools.length > 0) {
-      const toolList = tools.map((t) => JSON.stringify(t)).join("\n");
-      const toolsStr = `You have access to the following tools:
-${toolList}
-
-To call a tool, output exactly:
-<|tool_call_start|>[{"name": "tool_name", "arguments": {"key": "value"}}]<|tool_call_end|>`;
+      const toolList = tools.map((t) => JSON.stringify(t)).join(", ");
+      const toolsStr = `List of tools: <|tool_list_start|>[${toolList}]<|tool_list_end|>`;
       systemPrompt = systemPrompt ? `${systemPrompt}
 ${toolsStr}` : toolsStr;
     }
-    let out = "";
+    let out = "<|startoftext|>";
     if (systemPrompt) {
       out += `<|im_start|>system
 ${systemPrompt}<|im_end|>
