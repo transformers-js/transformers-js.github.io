@@ -111,8 +111,6 @@ async function cpuResize(image, size, filter = "bilinear") {
       return bilinear(image, size);
     case "bicubic":
       return bicubic(image, size);
-    case "lanczos":
-      return bicubic(image, size);
   }
 }
 var init_cpu = __esm({
@@ -185,7 +183,7 @@ function makeWebGPUResize(device) {
   }
   return async function webgpuResize(image, size, filter = "bilinear") {
     if (filter === "bilinear") return gpuDispatch(bilinearPipeline, image, size);
-    if (filter === "bicubic" || filter === "lanczos") return gpuDispatch(bicubicPipeline, image, size);
+    if (filter === "bicubic") return gpuDispatch(bicubicPipeline, image, size);
     const { cpuResize: cpuResize2 } = await Promise.resolve().then(() => (init_cpu(), cpu_exports));
     return cpuResize2(image, size, filter);
   };
@@ -421,6 +419,9 @@ var ONNXSession = class _ONNXSession {
     this.session = session;
     this.ort = ort;
   }
+  get inputNames() {
+    return this.session.inputNames ?? [];
+  }
   static async load(modelBuffer, device, externalData) {
     const ort = await getORT();
     const firstByte = new Uint8Array(modelBuffer, 0, 1)[0];
@@ -492,7 +493,7 @@ var PIL_RESAMPLE = {
   0: "nearest",
   2: "bilinear",
   3: "bicubic",
-  1: "lanczos"
+  1: "bicubic"
 };
 function normalizeSize(raw, fallback) {
   if (!raw) return { height: fallback, width: fallback };
@@ -533,10 +534,7 @@ var ImageProcessor = class _ImageProcessor {
     if (cfg.do_center_crop) img = centerCrop(img, cfg.crop_size);
     if (cfg.do_rescale) img = rescale(img, cfg.rescale_factor);
     if (cfg.do_normalize) img = normalize(img, cfg.image_mean, cfg.image_std);
-    const chw = hwcToChw(img);
-    const batched = new Float32Array(chw.length);
-    batched.set(chw);
-    return batched;
+    return hwcToChw(img);
   }
 };
 

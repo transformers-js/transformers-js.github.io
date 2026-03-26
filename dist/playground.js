@@ -111,8 +111,6 @@ async function cpuResize(image, size, filter = "bilinear") {
       return bilinear(image, size);
     case "bicubic":
       return bicubic(image, size);
-    case "lanczos":
-      return bicubic(image, size);
   }
 }
 var init_cpu = __esm({
@@ -185,7 +183,7 @@ function makeWebGPUResize(device) {
   }
   return async function webgpuResize(image, size, filter = "bilinear") {
     if (filter === "bilinear") return gpuDispatch(bilinearPipeline, image, size);
-    if (filter === "bicubic" || filter === "lanczos") return gpuDispatch(bicubicPipeline, image, size);
+    if (filter === "bicubic") return gpuDispatch(bicubicPipeline, image, size);
     const { cpuResize: cpuResize2 } = await Promise.resolve().then(() => (init_cpu(), cpu_exports));
     return cpuResize2(image, size, filter);
   };
@@ -439,6 +437,9 @@ var ONNXSession = class _ONNXSession {
     this.session = session;
     this.ort = ort;
   }
+  get inputNames() {
+    return this.session.inputNames ?? [];
+  }
   static async load(modelBuffer, device, externalData) {
     const ort = await getORT();
     const firstByte = new Uint8Array(modelBuffer, 0, 1)[0];
@@ -510,7 +511,7 @@ var PIL_RESAMPLE = {
   0: "nearest",
   2: "bilinear",
   3: "bicubic",
-  1: "lanczos"
+  1: "bicubic"
 };
 function normalizeSize(raw, fallback) {
   if (!raw) return { height: fallback, width: fallback };
@@ -551,10 +552,7 @@ var ImageProcessor = class _ImageProcessor {
     if (cfg.do_center_crop) img = centerCrop(img, cfg.crop_size);
     if (cfg.do_rescale) img = rescale(img, cfg.rescale_factor);
     if (cfg.do_normalize) img = normalize(img, cfg.image_mean, cfg.image_std);
-    const chw = hwcToChw(img);
-    const batched = new Float32Array(chw.length);
-    batched.set(chw);
-    return batched;
+    return hwcToChw(img);
   }
 };
 
@@ -615,7 +613,8 @@ var ImageClassificationPipeline = class _ImageClassificationPipeline {
   }
 };
 function softmax(logits) {
-  const max = Math.max(...logits);
+  let max = -Infinity;
+  for (let i = 0; i < logits.length; i++) if (logits[i] > max) max = logits[i];
   const exps = logits.map((v) => Math.exp(v - max));
   const sum = exps.reduce((a, b) => a + b, 0);
   return new Float32Array(exps.map((v) => v / sum));
@@ -3080,6 +3079,9 @@ var CLIPTokenizer = class _CLIPTokenizer {
   constructor(tokenizer) {
     this.tokenizer = tokenizer;
   }
+  static fromTokenizer(tokenizer) {
+    return new _CLIPTokenizer(tokenizer);
+  }
   static async fromHub(modelId) {
     const [tokenizerJson, tokenizerConfig] = await Promise.all([
       fetchJSON(modelId, "tokenizer.json"),
@@ -3471,7 +3473,8 @@ function argmax(logits) {
 function sampleTopP(logits, opts = {}) {
   const { temperature = 1, topP = 1 } = opts;
   const scaled = temperature === 1 ? logits : logits.map((v) => v / temperature);
-  const max = Math.max(...scaled);
+  let max = -Infinity;
+  for (let i = 0; i < scaled.length; i++) if (scaled[i] > max) max = scaled[i];
   const exps = scaled.map((v) => Math.exp(v - max));
   const sum = exps.reduce((a, b) => a + b, 0);
   const probs = exps.map((v) => v / sum);
@@ -3555,7 +3558,6 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
   const logitsData = prefillOut["logits"].data;
   const lastLogits = logitsData.subarray(logitsData.length - vocabSize);
   let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
-  console.debug("[tfjs] prefill logits dims:", logitsDims, "vocabSize:", vocabSize, "firstToken:", nextToken, "eosTokenId:", eosTokenId);
   generated.push(nextToken);
   let pastLen = seqLen;
   while (nextToken !== eosTokenId && generated.length < maxNewTokens) {
@@ -3616,7 +3618,7 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
     ]);
     const externalData = [{ path: dataFile.split("/").pop(), data: dataBuffer }];
     const session = await ONNXSession.load(modelBuffer, device, externalData);
-    const inputNames = session.session.inputNames ?? [];
+    const inputNames = session.inputNames;
     const hasPositionIds = inputNames.includes("position_ids");
     return new _LFM2ForCausalLM(session, tokenizer, config, config.eos_token_id, hasPositionIds, inputNames);
   }
@@ -3635,7 +3637,6 @@ var LFM2ForCausalLM = class _LFM2ForCausalLM {
       this.hasPositionIds,
       this.inputNames
     );
-    console.debug("[tfjs] generatedIds:", generatedIds, "eosTokenId:", this.eosTokenId);
     return this.tokenizer.decode(generatedIds);
   }
   dispose() {
@@ -3774,7 +3775,7 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
         { path: decoderData.split("/").pop(), data: decoderDataBuffer }
       ])
     ]);
-    const decInputNames = decoderSession.session.inputNames ?? [];
+    const decInputNames = decoderSession.inputNames;
     const hasPositionIds = decInputNames.includes("position_ids");
     const textCfg = config.text_config;
     return new _LFM2VLForConditionalGeneration(
@@ -3819,6 +3820,7 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
     const prefillSeqLen = prefillEmbeds.length / this.hiddenSize;
     const cache = initCache(this.decoderInputNames, this.modelCfg);
     const attnMask = new BigInt64Array(prefillSeqLen).fill(1n);
+    const hasNumLogitsToKeep = this.decoderInputNames.includes("num_logits_to_keep");
     const prefillInputs = {
       inputs_embeds: { data: prefillEmbeds, dims: [1, prefillSeqLen, this.hiddenSize] },
       attention_mask: { data: attnMask, dims: [1, prefillSeqLen] },
@@ -3830,14 +3832,15 @@ var LFM2VLForConditionalGeneration = class _LFM2VLForConditionalGeneration {
         dims: [1, prefillSeqLen]
       };
     }
+    if (hasNumLogitsToKeep) {
+      prefillInputs["num_logits_to_keep"] = { data: new BigInt64Array([1n]), dims: [1] };
+    }
     const prefillOut = await this.decoder.run(prefillInputs);
     updateCache(cache, prefillOut);
-    const vocabSize = prefillOut["logits"].dims[2];
-    const lastLogits = new Float32Array(
-      prefillOut["logits"].data.buffer,
-      (prefillSeqLen - 1) * vocabSize * 4,
-      vocabSize
-    );
+    const logitsDims = prefillOut["logits"].dims;
+    const vocabSize = logitsDims[logitsDims.length - 1];
+    const logitsData = prefillOut["logits"].data;
+    const lastLogits = logitsData.subarray(logitsData.length - vocabSize);
     let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
     const generated = [nextToken];
     let pastLen = prefillSeqLen;
