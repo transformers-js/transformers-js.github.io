@@ -3555,9 +3555,10 @@ async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, in
   }
   const prefillOut = await session.run(prefillInputs);
   updateCache(cache, prefillOut);
-  const vocabSize = prefillOut["logits"].dims[2];
+  const logitsDims = prefillOut["logits"].dims;
+  const vocabSize = logitsDims[logitsDims.length - 1];
   const logitsData = prefillOut["logits"].data;
-  const lastLogits = hasNumLogitsToKeep ? logitsData : logitsData.subarray((seqLen - 1) * vocabSize, seqLen * vocabSize);
+  const lastLogits = logitsData.subarray(logitsData.length - vocabSize);
   let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
   generated.push(nextToken);
   let pastLen = seqLen;
