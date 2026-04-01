@@ -133,7 +133,7 @@ function makeWebGPUResize(device) {
     layout: "auto",
     compute: { module: device.createShaderModule({ code: BICUBIC_SHADER }), entryPoint: "main" }
   });
-  async function gpuDispatch(pipeline2, image, size) {
+  async function gpuDispatch(pipeline, image, size) {
     const { width: dw, height: dh } = size;
     const { width: sw, height: sh, channels: c } = image;
     const dstBytes = dw * dh * c * 4;
@@ -153,7 +153,7 @@ function makeWebGPUResize(device) {
     });
     device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([sw, sh, dw, dh, c]));
     const bindGroup = device.createBindGroup({
-      layout: pipeline2.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: srcBuf } },
         { binding: 1, resource: { buffer: dstBuf } },
@@ -162,7 +162,7 @@ function makeWebGPUResize(device) {
     });
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
-    pass.setPipeline(pipeline2);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.ceil(dw / 8), Math.ceil(dh / 8));
     pass.end();
@@ -3049,157 +3049,6 @@ function updateCache(cache, outputs) {
     cache[cacheKey] = { data: tensor.data, dims: tensor.dims };
   }
 }
-async function generate(session, promptIds, modelCfg, genCfg, hasPositionIds, inputNames, onToken) {
-  const { eosTokenId, maxNewTokens = 512, sampling } = genCfg;
-  const generated = [];
-  const cache = initCache(inputNames, modelCfg);
-  const seqLen = promptIds.length;
-  const inputIds = new BigInt64Array(promptIds.map(BigInt));
-  const attentionMask = new BigInt64Array(seqLen).fill(1n);
-  const hasNumLogitsToKeep = inputNames.includes("num_logits_to_keep");
-  const prefillInputs = {
-    input_ids: { data: inputIds, dims: [1, seqLen] },
-    attention_mask: { data: attentionMask, dims: [1, seqLen] },
-    ...cache
-  };
-  if (hasPositionIds) {
-    const posIds = new BigInt64Array(seqLen).map((_, i) => BigInt(i));
-    prefillInputs["position_ids"] = { data: posIds, dims: [1, seqLen] };
-  }
-  if (hasNumLogitsToKeep) {
-    prefillInputs["num_logits_to_keep"] = { data: new BigInt64Array([1n]), dims: [1] };
-  }
-  const prefillOut = await session.run(prefillInputs);
-  updateCache(cache, prefillOut);
-  const logitsDims = prefillOut["logits"].dims;
-  const vocabSize = logitsDims[logitsDims.length - 1];
-  const logitsData = prefillOut["logits"].data;
-  const lastLogits = logitsData.subarray(logitsData.length - vocabSize);
-  let nextToken = sampling ? sampleTopP(lastLogits, sampling) : argmax(lastLogits);
-  generated.push(nextToken);
-  onToken?.(nextToken);
-  let pastLen = seqLen;
-  while (nextToken !== eosTokenId && generated.length < maxNewTokens) {
-    const decodeInputs = {
-      input_ids: { data: new BigInt64Array([BigInt(nextToken)]), dims: [1, 1] },
-      attention_mask: { data: new BigInt64Array(pastLen + 1).fill(1n), dims: [1, pastLen + 1] },
-      ...cache
-    };
-    if (hasPositionIds) {
-      decodeInputs["position_ids"] = {
-        data: new BigInt64Array([BigInt(pastLen)]),
-        dims: [1, 1]
-      };
-    }
-    if (hasNumLogitsToKeep) {
-      decodeInputs["num_logits_to_keep"] = { data: new BigInt64Array([1n]), dims: [1] };
-    }
-    const out = await session.run(decodeInputs);
-    updateCache(cache, out);
-    pastLen++;
-    const logits = out["logits"].data;
-    nextToken = sampling ? sampleTopP(logits, sampling) : argmax(logits);
-    generated.push(nextToken);
-    onToken?.(nextToken);
-  }
-  if (generated[generated.length - 1] === eosTokenId) generated.pop();
-  return generated;
-}
-
-// src/models/lfm2.ts
-var ONNX_FILE = {
-  q8: "onnx/model_q8.onnx",
-  q4: "onnx/model_q4.onnx",
-  fp16: "onnx/model_fp16.onnx"
-};
-var DATA_FILE = {
-  q8: "onnx/model_q8.onnx_data",
-  q4: "onnx/model_q4.onnx_data",
-  fp16: "onnx/model_fp16.onnx_data"
-};
-var LFM2ForCausalLM = class _LFM2ForCausalLM {
-  constructor(session, tokenizer, modelCfg, eosTokenId, hasPositionIds, inputNames) {
-    this.session = session;
-    this.tokenizer = tokenizer;
-    this.modelCfg = modelCfg;
-    this.eosTokenId = eosTokenId;
-    this.hasPositionIds = hasPositionIds;
-    this.inputNames = inputNames;
-  }
-  static async fromHub(modelId, options = {}) {
-    const { device = "webgpu", precision = "q8", mirrorBaseUrl } = options;
-    const onnxFile = ONNX_FILE[precision];
-    const dataFile = DATA_FILE[precision];
-    const [modelBuffer, dataBuffer, config, tokenizer] = await Promise.all([
-      fetchRaw(modelId, onnxFile, mirrorBaseUrl),
-      fetchRaw(modelId, dataFile, mirrorBaseUrl),
-      fetchJSON(modelId, "config.json", mirrorBaseUrl),
-      LFM2Tokenizer.fromHub(modelId, mirrorBaseUrl)
-    ]);
-    const externalData = [{ path: dataFile.split("/").pop(), data: dataBuffer }];
-    const session = await ONNXSession.load(modelBuffer, device, externalData);
-    const inputNames = session.inputNames;
-    const hasPositionIds = inputNames.includes("position_ids");
-    return new _LFM2ForCausalLM(session, tokenizer, config, config.eos_token_id, hasPositionIds, inputNames);
-  }
-  async chat(messages, options = {}) {
-    const promptIds = this.tokenizer.encodeChat(messages, options.tools);
-    const genCfg = {
-      eosTokenId: this.eosTokenId,
-      ...options.maxNewTokens !== void 0 ? { maxNewTokens: options.maxNewTokens } : {},
-      ...options.sampling !== void 0 ? { sampling: options.sampling } : {}
-    };
-    let onToken;
-    if (options.onChunk) {
-      const onChunk = options.onChunk;
-      const accumulated = [];
-      let prevLength = 0;
-      onToken = (tokenId) => {
-        accumulated.push(tokenId);
-        const text = this.tokenizer.decode(accumulated);
-        const delta = text.slice(prevLength);
-        if (delta) {
-          onChunk(delta);
-          prevLength = text.length;
-        }
-      };
-    }
-    const generatedIds = await generate(
-      this.session,
-      promptIds,
-      this.modelCfg,
-      genCfg,
-      this.hasPositionIds,
-      this.inputNames,
-      onToken
-    );
-    return this.tokenizer.decode(generatedIds);
-  }
-  dispose() {
-    this.session.dispose();
-  }
-};
-
-// src/pipeline/text-generation.ts
-var TextGenerationPipeline = class _TextGenerationPipeline {
-  constructor(model) {
-    this.model = model;
-  }
-  static async create(modelId, options = {}) {
-    const model = await LFM2ForCausalLM.fromHub(modelId, options);
-    return new _TextGenerationPipeline(model);
-  }
-  /**
-   * Send a conversation and get the assistant reply.
-   * Pass `onChunk` for streaming text output as tokens are generated.
-   */
-  run(messages, options = {}) {
-    return this.model.chat(messages, options);
-  }
-  dispose() {
-    this.model.dispose();
-  }
-};
 
 // src/preprocessing/lfm2-vl.ts
 var TILE_SIZE = 512;
@@ -3508,38 +3357,9 @@ function spliceImageEmbeds(tokenEmbeds, promptIds, imageTokenId, imageFeatures, 
   }
   return out;
 }
-
-// src/pipeline/image-text-to-text.ts
-var ImageTextToTextPipeline = class _ImageTextToTextPipeline {
-  constructor(model) {
-    this.model = model;
-  }
-  static async create(modelId, options = {}) {
-    const model = await LFM2VLForConditionalGeneration.fromHub(modelId, options);
-    return new _ImageTextToTextPipeline(model);
-  }
-  /** Send an image + conversation and get the assistant reply. */
-  run(messages, image, options = {}) {
-    return this.model.chat(messages, image, options);
-  }
-  dispose() {
-    this.model.dispose();
-  }
-};
-
-// src/pipeline/index.ts
-async function pipeline(task, options) {
-  const { model, ...rest } = options;
-  switch (task) {
-    case "text-generation":
-      return TextGenerationPipeline.create(model, rest);
-    case "image-text-to-text":
-      return ImageTextToTextPipeline.create(model, rest);
-  }
-}
 export {
+  LFM2VLForConditionalGeneration,
   initRuntime,
-  pipeline,
   setHFToken
 };
-//# sourceMappingURL=playground.js.map
+//# sourceMappingURL=lfm2-vl.js.map
